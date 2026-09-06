@@ -1,3 +1,9 @@
+v4.26.1
+=======
+
+* Accessing an index with no errors on an ``ErrorTree`` no longer causes that index to appear in the tree (#1328).
+  Subtrees also properly propagate lookup errors which were previously missing when accessing indices not in the subtree.
+
 v4.26.0
 =======
 

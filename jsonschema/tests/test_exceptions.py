@@ -476,6 +476,50 @@ class TestErrorTree(TestCase):
         tree = exceptions.ErrorTree([e1, e2])
         self.assertEqual(set(tree), {"bar", "foobar"})
 
+    def test_accessing_an_error_free_index_does_not_add_it_to_the_tree(self):
+        """
+        Retrieving a subtree for an index with no errors returns an
+        empty tree but must not change what the tree contains.
+
+        See https://github.com/python-jsonschema/jsonschema/issues/1328
+        """
+        error = exceptions.ValidationError(
+            "a message", validator="foo", instance=["spam", "eggs"], path=[0],
+        )
+        tree = exceptions.ErrorTree([error])
+
+        subtree = tree[1]
+
+        self.assertEqual(subtree.total_errors, 0)
+        self.assertNotIn(1, tree)
+        self.assertEqual(list(tree), [0])
+        self.assertEqual(tree.total_errors, 1)
+
+    def test_error_free_subtrees_still_know_their_instance(self):
+        """
+        Subtrees for indices with no errors still propagate lookup
+        errors from the instance they correspond to.
+        """
+        error = exceptions.ValidationError(
+            "a message", validator="foo", instance={"bar": []}, path=["foo"],
+        )
+        tree = exceptions.ErrorTree([error])
+
+        subtree = tree["foo"]["bar"]
+        self.assertEqual(subtree.total_errors, 0)
+
+        with self.assertRaises(IndexError):
+            subtree[0]
+
+    def test_it_can_be_given_the_instance_it_corresponds_to(self):
+        tree = exceptions.ErrorTree(instance={"foo": []})
+
+        with self.assertRaises(KeyError):
+            tree["bar"]
+
+        with self.assertRaises(IndexError):
+            tree["foo"][0]
+
     def test_repr_single(self):
         error = exceptions.ValidationError(
             "1",

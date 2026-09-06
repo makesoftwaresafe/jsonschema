@@ -3,7 +3,7 @@ Validation errors, and some surrounding helpers.
 """
 from __future__ import annotations
 
-from collections import defaultdict, deque
+from collections import deque
 from pprint import pformat
 from textwrap import dedent, indent
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -315,18 +315,37 @@ class FormatError(Exception):
 class ErrorTree:
     """
     ErrorTrees make it easier to check which validations failed.
+
+    Arguments:
+
+        errors:
+
+            the errors to populate the tree with
+
+        instance:
+
+            the instance the tree corresponds to, if known, which
+            enables indexing the tree at indices not present in it to
+            raise the same error that indexing the instance itself would
+
     """
 
-    _instance = _unset
-
-    def __init__(self, errors: Iterable[ValidationError] = ()):
+    def __init__(
+        self,
+        errors: Iterable[ValidationError] = (),
+        *,
+        instance: Any = _unset,
+    ):
         self.errors: MutableMapping[str, ValidationError] = {}
-        self._contents: Mapping[str, ErrorTree] = defaultdict(self.__class__)
+        self._contents: MutableMapping[str | int, ErrorTree] = {}
+        self._instance = instance
 
         for error in errors:
             container = self
             for element in error.path:
-                container = container[element]
+                container = container._contents.setdefault(
+                    element, self.__class__(),
+                )
             container.errors[error.validator] = error
 
             container._instance = error.instance
@@ -346,9 +365,11 @@ class ErrorTree:
         by ``instance.__getitem__`` will be propagated (usually this is
         some subclass of `LookupError`.
         """
-        if self._instance is not _unset and index not in self:
-            self._instance[index]
-        return self._contents[index]
+        if index in self:
+            return self._contents[index]
+        if self._instance is _unset:
+            return self.__class__()
+        return self.__class__(instance=self._instance[index])
 
     def __setitem__(self, index: str | int, value: ErrorTree):
         """
@@ -365,7 +386,7 @@ class ErrorTree:
             DeprecationWarning,
             stacklevel=2,
         )
-        self._contents[index] = value  # type: ignore[index]
+        self._contents[index] = value
 
     def __iter__(self):
         """
