@@ -35,6 +35,16 @@ class TestBestMatch(TestCase):
         best = self.best_match_of(instance={"foo": {"bar": []}}, schema=schema)
         self.assertEqual(best.validator, "minProperties")
 
+    def test_earlier_sibling_errors_are_better_matches(self):
+        """
+        Among equally relevant errors, the one earliest in the instance wins,
+        regardless of the order in which the errors are provided.
+        """
+
+        schema = {"items": {"const": 37}}
+        best = self.best_match_of(instance=[12, 12, 12], schema=schema)
+        self.assertEqual(list(best.path), [0])
+
     def test_oneOf_and_anyOf_are_weak_matches(self):
         """
         A property you *must* match is probably better than one you have to

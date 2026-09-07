@@ -4,6 +4,7 @@ Validation errors, and some surrounding helpers.
 from __future__ import annotations
 
 from collections import deque
+from operator import itemgetter
 from pprint import pformat
 from textwrap import dedent, indent
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -497,25 +498,55 @@ def best_match(errors, key=relevance):
         set of inputs from version to version if better heuristics are added.
 
     """
-    best = max(errors, key=key, default=None)
-    if best is None:
+    most_relevant = None
+    for error in errors:
+        most_relevant = _more_relevant(most_relevant, (key(error), error))
+    if most_relevant is None:
         return
+    _, best = most_relevant
 
     while best.context:
-        # Calculate the most relevant error in each separate subschema
-        best_in_subschemas = []
+        # Find the most relevant error within each separate subschema,
+        # computing each error's key exactly once along the way.
+        best_in_subschemas: dict[Any, tuple[Any, ValidationError]] = {}
         for error in best.context:
-            index = error.schema_path[0]
-            if index == len(best_in_subschemas):
-                best_in_subschemas.append(error)
-            else:
-                prev = best_in_subschemas[index]
-                best_in_subschemas[index] = max(prev, error, key=key)
+            index = error.schema_path[0] if error.schema_path else None
+            best_in_subschemas[index] = _more_relevant(
+                best_in_subschemas.get(index),
+                (key(error), error),
+            )
 
         # Calculate the minimum via nsmallest, because we don't recurse if
         # all nested errors have the same relevance (i.e. if min == max == all)
-        smallest = heapq.nsmallest(2, best_in_subschemas, key=key)
-        if len(smallest) == 2 and key(smallest[0]) == key(smallest[1]):  # noqa: PLR2004
+        smallest = heapq.nsmallest(
+            2,
+            best_in_subschemas.values(),
+            key=itemgetter(0),
+        )
+        if len(smallest) == 2 and smallest[0][0] == smallest[1][0]:  # noqa: PLR2004
             return best
-        best = smallest[0]
+        _, best = smallest[0]
     return best
+
+
+def _more_relevant(
+    previous: tuple[Any, ValidationError] | None,
+    candidate: tuple[Any, ValidationError],
+) -> tuple[Any, ValidationError]:
+    """
+    Pick the more relevant of two ``(key, error)`` pairs.
+
+    Equally relevant errors are settled by picking the one which appears
+    earlier in the instance, which makes the choice independent of the
+    order in which the errors happened to be produced.
+    """
+    if previous is None:
+        return candidate
+    previous_key, previous_error = previous
+    candidate_key, candidate_error = candidate
+    if candidate_key > previous_key or (
+        candidate_key == previous_key
+        and candidate_error.path < previous_error.path
+    ):
+        return candidate
+    return previous
