@@ -3,12 +3,10 @@ Validation errors, and some surrounding helpers.
 """
 from __future__ import annotations
 
-from collections import deque
-from operator import itemgetter
+from collections import defaultdict, deque
 from pprint import pformat
 from textwrap import dedent, indent
-from typing import TYPE_CHECKING, Any, ClassVar
-import heapq
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 import re
 import warnings
 
@@ -18,7 +16,13 @@ from referencing.exceptions import Unresolvable as _Unresolvable
 from jsonschema import _utils
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, MutableMapping, Sequence
+    from collections.abc import (
+        Callable,
+        Iterable,
+        Mapping,
+        MutableMapping,
+        Sequence,
+    )
 
     from jsonschema import _types
 
@@ -196,6 +200,9 @@ class _Error(Exception):
             self._type_checker.is_type(self.instance, expected_type)
             for expected_type in expected
         )
+
+
+_E = TypeVar("_E", bound=_Error)
 
 
 class ValidationError(_Error):
@@ -468,9 +475,10 @@ def best_match(errors, key=relevance):
 
     If the resulting match is either :kw:`oneOf` or :kw:`anyOf`, the
     *opposite* assumption is made -- i.e. the deepest error is picked
-    among the most relevant errors in each separate subschema,
-    since these keywords only need to match once, and any other errors
-    may not be relevant.
+    among the most relevant errors in each separate subschema (preferring
+    subschemas which produced fewer errors when tied), since these
+    keywords only need to match once, and any other errors may not be
+    relevant.
 
     Arguments:
         errors (collections.abc.Iterable):
@@ -498,55 +506,57 @@ def best_match(errors, key=relevance):
         set of inputs from version to version if better heuristics are added.
 
     """
-    most_relevant = None
-    for error in errors:
-        most_relevant = _more_relevant(most_relevant, (key(error), error))
-    if most_relevant is None:
+    _, best = _most_relevant(errors, key=key)
+    if best is None:
         return
-    _, best = most_relevant
 
     while best.context:
-        # Find the most relevant error within each separate subschema,
-        # computing each error's key exactly once along the way.
-        best_in_subschemas: dict[Any, tuple[Any, ValidationError]] = {}
+        # Group the errors by the subschema which produced them.
+        by_subschema: dict[Any, list[_Error]] = defaultdict(list)
         for error in best.context:
             index = error.schema_path[0] if error.schema_path else None
-            best_in_subschemas[index] = _more_relevant(
-                best_in_subschemas.get(index),
-                (key(error), error),
-            )
+            by_subschema[index].append(error)
 
-        # Calculate the minimum via nsmallest, because we don't recurse if
-        # all nested errors have the same relevance (i.e. if min == max == all)
-        smallest = heapq.nsmallest(
-            2,
-            best_in_subschemas.values(),
-            key=itemgetter(0),
-        )
-        if len(smallest) == 2 and smallest[0][0] == smallest[1][0]:  # noqa: PLR2004
-            return best
-        _, best = smallest[0]
+        # Rank each subschema by how deep its most relevant error is,
+        # and amongst those equally deep, by how few errors it produced
+        # (i.e. how close it was to being valid). Lower ranks are better.
+        best_rank, best_in_subschema, tied = None, None, False
+        for errors_in_subschema in by_subschema.values():
+            error_key, error = _most_relevant(errors_in_subschema, key=key)
+            rank = error_key, len(errors_in_subschema)
+            if best_rank is None or rank < best_rank:
+                best_rank, best_in_subschema, tied = rank, error, False
+            elif rank == best_rank:
+                tied = True
+
+        # If multiple subschemas rank equally we can't tell which was
+        # intended, so we stop here rather than descend into one of them.
+        if tied:
+            break
+        best = best_in_subschema
     return best
 
 
-def _more_relevant(
-    previous: tuple[Any, ValidationError] | None,
-    candidate: tuple[Any, ValidationError],
-) -> tuple[Any, ValidationError]:
+def _most_relevant(
+    errors: Iterable[_E],
+    key: Callable[[_E], Any],
+) -> tuple[Any, _E | None]:
     """
-    Pick the more relevant of two ``(key, error)`` pairs.
+    Find the most relevant error along with its key, computing each key once.
 
     Equally relevant errors are settled by picking the one which appears
     earlier in the instance, which makes the choice independent of the
     order in which the errors happened to be produced.
+
+    Returns ``(None, None)`` if there were no errors.
     """
-    if previous is None:
-        return candidate
-    previous_key, previous_error = previous
-    candidate_key, candidate_error = candidate
-    if candidate_key > previous_key or (
-        candidate_key == previous_key
-        and candidate_error.path < previous_error.path
-    ):
-        return candidate
-    return previous
+    best_key, best = None, None
+    for error in errors:
+        error_key = key(error)
+        if (
+            best is None
+            or error_key > best_key
+            or (error_key == best_key and error.path < best.path)
+        ):
+            best_key, best = error_key, error
+    return best_key, best

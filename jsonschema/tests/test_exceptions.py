@@ -45,6 +45,35 @@ class TestBestMatch(TestCase):
         best = self.best_match_of(instance=[12, 12, 12], schema=schema)
         self.assertEqual(list(best.path), [0])
 
+    def test_earlier_sibling_errors_within_a_subschema_are_better_matches(
+        self,
+    ):
+        """
+        The same holds within an anyOf subschema, even though its errors are
+        always provided in the order they were produced in.
+        """
+
+        schema = {"anyOf": [{"items": {"const": 37}}]}
+        error = next(_LATEST_VERSION(schema).iter_errors([12, 12, 12]))
+        error.context.reverse()
+        best = exceptions.best_match([error])
+        self.assertEqual(list(best.path), [0])
+
+    def test_hand_constructed_errors_with_context(self):
+        """
+        Errors constructed by hand need not have any schema path at all.
+        """
+
+        error = exceptions.ValidationError(
+            "parent",
+            context=[
+                exceptions.ValidationError("child", path=["foo"]),
+                exceptions.ValidationError("grandchild", path=["foo", "bar"]),
+            ],
+        )
+        best = exceptions.best_match([error])
+        self.assertEqual(best.message, "child")
+
     def test_oneOf_and_anyOf_are_weak_matches(self):
         """
         A property you *must* match is probably better than one you have to
@@ -160,10 +189,13 @@ class TestBestMatch(TestCase):
         best = self.best_match_of(instance={"foo": 1, "bar": 1}, schema=schema)
         self.assertEqual(best.validator, "anyOf")
 
-    def test_no_anyOf_traversal_for_two_items_sibling_errors(self):
+    def test_anyOf_traversal_prefers_subschemas_with_fewer_errors(self):
         """
-        We don't traverse into an anyOf if all of its context errors
-        seem to be equally "wrong" against the instance.
+        When subschemas fail at the same depth, we traverse into the one
+        which produced fewer errors, since it was closer to being valid.
+
+        Here the first subschema rejects every item, whereas the second
+        rejects only the non-integer one.
         """
 
         schema = {
@@ -188,9 +220,40 @@ class TestBestMatch(TestCase):
             },
         }
         best = self.best_match_of(instance=["not an int", 0], schema=schema)
-        self.assertEqual(best.validator, "anyOf")
+        self.assertEqual(best.validator, "type")
+        self.assertEqual(best.instance, "not an int")
         best = self.best_match_of(instance=[0, "not an int"], schema=schema)
-        self.assertEqual(best.validator, "anyOf")
+        self.assertEqual(best.validator, "type")
+        self.assertEqual(best.instance, "not an int")
+
+    def test_anyOf_traversal_for_partially_matching_subschemas(self):
+        """
+        When one subschema matches more of the instance than another,
+        we traverse into it, and report its remaining error.
+
+        See #1002.
+        """
+
+        schema = {
+            "anyOf": [
+                {
+                    "properties": {
+                        "version": {"const": 1},
+                        "description": {"type": "string"},
+                    },
+                },
+                {
+                    "properties": {
+                        "version": {"const": 2},
+                        "description": {"type": "string"},
+                    },
+                },
+            ],
+        }
+        instance = {"version": 1, "description": 0}
+        best = self.best_match_of(instance=instance, schema=schema)
+        self.assertEqual(best.validator, "type")
+        self.assertEqual(list(best.path), ["description"])
 
     def test_anyOf_traversal_for_single_equally_relevant_error(self):
         """
@@ -337,10 +400,13 @@ class TestBestMatch(TestCase):
         best = self.best_match_of(instance={"foo": 1, "bar": 1}, schema=schema)
         self.assertEqual(best.validator, "oneOf")
 
-    def test_no_oneOf_traversal_for_two_items_sibling_errors(self):
+    def test_oneOf_traversal_prefers_subschemas_with_fewer_errors(self):
         """
-        We don't traverse into an anyOf if all of its context errors
-        seem to be equally "wrong" against the instance.
+        When subschemas fail at the same depth, we traverse into the one
+        which produced fewer errors, since it was closer to being valid.
+
+        Here the first subschema rejects every item, whereas the second
+        rejects only the non-integer one.
         """
 
         schema = {
@@ -365,9 +431,40 @@ class TestBestMatch(TestCase):
             },
         }
         best = self.best_match_of(instance=["not an int", 0], schema=schema)
-        self.assertEqual(best.validator, "oneOf")
+        self.assertEqual(best.validator, "type")
+        self.assertEqual(best.instance, "not an int")
         best = self.best_match_of(instance=[0, "not an int"], schema=schema)
-        self.assertEqual(best.validator, "oneOf")
+        self.assertEqual(best.validator, "type")
+        self.assertEqual(best.instance, "not an int")
+
+    def test_oneOf_traversal_for_partially_matching_subschemas(self):
+        """
+        When one subschema matches more of the instance than another,
+        we traverse into it, and report its remaining error.
+
+        See #1002.
+        """
+
+        schema = {
+            "oneOf": [
+                {
+                    "properties": {
+                        "version": {"const": 1},
+                        "description": {"type": "string"},
+                    },
+                },
+                {
+                    "properties": {
+                        "version": {"const": 2},
+                        "description": {"type": "string"},
+                    },
+                },
+            ],
+        }
+        instance = {"version": 1, "description": 0}
+        best = self.best_match_of(instance=instance, schema=schema)
+        self.assertEqual(best.validator, "type")
+        self.assertEqual(list(best.path), ["description"])
 
     def test_oneOf_traversal_for_single_equally_relevant_error(self):
         """
